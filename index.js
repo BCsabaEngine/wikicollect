@@ -3,6 +3,31 @@ const got = require('got')
 const util = require('util')
 const HTMLParser = require('node-html-parser')
 const html_entities = require('html-entities')
+const mysql = require('mysql')
+
+class Database {
+  constructor(config) {
+    this.connection = mysql.createConnection(config);
+  }
+  query(sql, args) {
+    return new Promise((resolve, reject) => {
+      this.connection.query(sql, args, (err, rows) => {
+        if (err)
+          return reject(err);
+        resolve(rows);
+      });
+    });
+  }
+  close() {
+    return new Promise((resolve, reject) => {
+      this.connection.end(err => {
+        if (err)
+          return reject(err);
+        resolve();
+      });
+    });
+  }
+}
 
 const wikiroot = 'https://hu.wikipedia.org'
 
@@ -17,10 +42,10 @@ function DomTraversal(element, enabled, cb) {
 async function GetWikiPage(url) {
   const html = await got(wikiroot + url)
   const dom = HTMLParser.parse(html.body);
-  // fs.writeFileSync('./inspect1', util.inspect(dom, false, null, false))
 
   let titletext = ''
   let text = ''
+  const urls = []
 
   const titledom = dom.querySelector('title')
   if (titledom) {
@@ -29,10 +54,6 @@ async function GetWikiPage(url) {
   }
 
   const output = dom.querySelectorAll('.mw-parser-output')[0]
-
-  // fs.writeFileSync('./inspect2', util.inspect(output, false, null, false))
-
-  const urls = []
   DomTraversal(output,
     function (element) {
       if (element.constructor.name == 'TextNode')
@@ -54,11 +75,10 @@ async function GetWikiPage(url) {
       return false
     },
     function (element) {
-      if (element.constructor.name == 'TextNode') {
-        // console.log(element.rawText)
+      if (element.constructor.name == 'TextNode')
         if (element.rawText)
           text += html_entities.decode(element.rawText)
-      }
+
       if (element.rawAttrs) {
         const match = element.rawAttrs.match(/href="(\/wiki\/[^"]*)"/)
         if (match)
@@ -71,30 +91,85 @@ async function GetWikiPage(url) {
     text = text.replace('\n\n\n', '\n\n')
   text = text.trim()
 
-  // console.log(text)
-  // fs.writeFileSync('./text', text)
-
   urls.sort()
-  // console.log(urls)
-
   return {
+    url: url,
     title: titletext,
     text: text,
     urls: urls
   }
-
-  //  const inspect = util.inspect(ouput[0], false, null, false)
-  //  console.log(inspect)
-  //console.log(tree.childNodes[1].childNodes[2])
 }
 
-async function Exec() {
-  try {
-    const wcontent = await GetWikiPage('/wiki/Pécs');
-    console.log(wcontent.urls.length)
+function GetDatabase() {
+  return new Database({
+    host: 'localhost',
+    user: 'root',
+    password: 'root',
+    database: 'wikicollect'
+  });
+}
+
+async function StoreWikiPage(pageinfo) {
+  const database = GetDatabase();
+
+  await database.query('SELECT 1 FROM Page WHERE Url = ?', pageinfo.url)
+    .then((exists) => {
+      if (exists && exists.length) return
+
+      var pagerow = { Url: pageinfo.url, Title: pageinfo.title, Content: pageinfo.text };
+      database.query('INSERT INTO Page SET ?', pagerow)
+    })
+
+
+  await database.query('UPDATE Url SET Processed = NOW() WHERE Url = ?', pageinfo.url)
+
+  for (const url of pageinfo.urls)
+    await database.query('SELECT 1 FROM Url WHERE Url = ?', url)
+      .then((exists) => {
+        if (exists && exists.length) return
+
+        var urlrow = { Url: url };
+        database.query('INSERT INTO Url SET ?', urlrow)
+      })
+
+  await database.close()
+}
+
+async function FindUnProcessed() {
+  const database = GetDatabase();
+
+  const result = await database.query('SELECT Url FROM Url WHERE Processed IS NULL ORDER BY RAND() LIMIT 1')
+  await database.close()
+  if (result && result.length)
+    return result[0].Url
+
+  return null
+}
+
+async function StartAt(startpage) {
+  const pageinfo = await GetWikiPage(startpage);
+  await StoreWikiPage(pageinfo)
+
+  console.log("Ready")
+}
+
+async function RunUnprocessed() {
+  while (true) {
+    const nexturl = await FindUnProcessed();
+    if (!nexturl)
+      break;
+
+    console.log(`Processing ${nexturl}`)
+
+    const pageinfo = await GetWikiPage(nexturl);
+    await StoreWikiPage(pageinfo)
   }
-  catch (error) {
-    console.log(error.message)
-  }
-};
-Exec()
+}
+
+try {
+  //StartAt('/wiki/Pécs')
+  RunUnprocessed()
+}
+catch (error) {
+  console.log(error.message)
+}
