@@ -1,5 +1,8 @@
+const fs = require('fs')
+
 const { StoreWikiPage, FindUnProcessed, GetPages } = require('./lib/database')
 const { GetWikiPage } = require('./lib/Wiki')
+const { TrimEx } = require('./lib/Util')
 
 async function StartAt(startpage) {
   const pageinfo = await GetWikiPage(startpage);
@@ -22,23 +25,39 @@ async function RunUnprocessed() {
 }
 
 async function FillMemIndex() {
-  const pages = await GetPages(1)
+  const sentences = []
+
+  const pages = await GetPages(20000)
   for (const page of pages) {
     const content = page.Content.replaceAll('\t', '').replaceAll('\n\n', '\n')
 
     const lines = content.split('\n')
     lines.push(page.Title)
 
-    const sentences = []
     for (const line of lines) {
       const lsents = line.split('. ')
-      for (const lsent of lsents)
-        if (lsent.trim())
-          sentences.push(lsent.trim())
+      for (const lsent of lsents) {
+        const lsentt = TrimEx(lsent, [' ?-*;,!()"\'&'])
+        if (lsentt)
+          sentences.push(lsentt)
+      }
     }
 
-    console.log(sentences)
   }
+  console.log("Sorting...")
+  sentences.sort()
+
+  const usentences = []
+  let last = ''
+  for (const s of sentences) {
+    if (last != s)
+      usentences.push(s)
+    last = s
+  }
+
+  console.log("To file...")
+  fs.writeFileSync('./dat.json', JSON.stringify(usentences, null, 4))
+  console.log("Completed")
 }
 
 try {
